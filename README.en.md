@@ -184,18 +184,3 @@ has at most one subscription" directly in the schema, which is what makes
 `ON CONFLICT (user_id) DO UPDATE` a correct upsert instead of an approximation of
 one. `CHECK (amount > 0)` and the `gt=0`/`min_length=1` Pydantic validators reject
 malformed provider payloads before they reach the database.
-
----
-
-# Known limitations
-
-- No webhook signature verification: the endpoint trusts any caller that can
-  reach it. A production version would verify a provider-supplied signature
-  header before processing the payload.
-- No authentication/authorization on any endpoint.
-- No automated test suite.
-- `subscriptions.expires_at` is always reset to "now + 30 days" on a confirmed
-  payment; there's no proration or stacking logic for renewals made before the
-  current period ends.
-- `app/api/v1/` is mounted with no endpoints under it. It is reserved for future
-  versioned routes and is currently dead weight.
