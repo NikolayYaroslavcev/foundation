@@ -1,13 +1,16 @@
 # Foundation: payment webhooks → subscriptions
 
-A minimal backend service that accepts payment provider webhooks and turns confirmed
-payments into active user subscriptions. A single `POST /webhook/payment` endpoint
-records the payment and activates (or renews) the user's subscription for 30 days,
-safely under retried/duplicate webhook deliveries.
+**Русский** · [English](README.en.md)
+
+Минимальный бэкенд-сервис, который принимает вебхуки платёжного провайдера и превращает
+подтверждённые платежи в активные подписки пользователей. Единственный эндпоинт
+`POST /webhook/payment` записывает платёж и активирует (или продлевает) подписку
+пользователя на 30 дней, при этом безопасно переносит повторные и дублирующиеся
+доставки вебхука.
 
 ---
 
-# Stack
+# Стек
 
 - FastAPI
 - PostgreSQL
@@ -17,7 +20,7 @@ safely under retried/duplicate webhook deliveries.
 
 ---
 
-# Architecture
+# Архитектура
 
 ```
 app/
@@ -29,77 +32,79 @@ app/
   db/          engine/session
 ```
 
-**Why no separate Repository layer.** The write path is one operation: given a
-confirmed payment, upsert a `payments` row and upsert the matching `subscriptions`
-row, in one transaction. A repository here would just wrap two `INSERT ... ON
-CONFLICT` statements with no second caller and no query reuse — it would be an
-abstraction with nothing to abstract. `app/services/webhook.py` talks to
-SQLAlchemy directly; if a second write path or read-heavy queries show up later,
-extracting a repository at that point is cheap.
+**Почему нет отдельного слоя Repository.** Путь записи состоит из одной операции:
+для подтверждённого платежа сделать upsert строки в `payments` и upsert
+соответствующей строки в `subscriptions` в одной транзакции. Репозиторий здесь
+просто обернул бы два оператора `INSERT ... ON CONFLICT`, без второго вызывающего
+кода и без повторного использования запросов. Это была бы абстракция, абстрагировать
+в которой нечего. `app/services/webhook.py` работает с SQLAlchemy напрямую; если
+позже появится второй путь записи или запросы на чтение, выделить репозиторий в тот
+момент будет дёшево.
 
-**Why the transaction.** Both writes (`payments` insert, `subscriptions` upsert)
-happen inside a single `async with session.begin()` block. That makes "payment
-row exists, subscription was never activated" structurally impossible: either both
-writes commit, or neither does. There is no window — not even a crash between two
-separate commits — where the payment is recorded but the subscription update never
-happened.
+**Почему транзакция.** Обе записи (вставка в `payments`, upsert в `subscriptions`)
+выполняются внутри одного блока `async with session.begin()`. Из-за этого состояние
+«строка платежа есть, а подписка не активирована» структурно невозможно: либо
+коммитятся обе записи, либо ни одна. Нет окна, даже в виде сбоя между двумя
+отдельными коммитами, в котором платёж записан, а обновление подписки так и не
+произошло.
 
-**Why `ON CONFLICT` (`INSERT ... ON CONFLICT`) instead of `SELECT` then
-`INSERT`/`UPDATE`.** A check-then-write pattern (`SELECT ... ; if not found:
-INSERT`) has a race: two concurrent deliveries of the same webhook can both pass
-the `SELECT` before either commits, and both attempt to `INSERT`. Postgres's
-`ON CONFLICT` pushes the uniqueness check into the database itself, so the second
-of two concurrent inserts is resolved atomically by the constraint instead of by
-application logic that can race.
+**Почему `ON CONFLICT` (`INSERT ... ON CONFLICT`), а не `SELECT`, а затем
+`INSERT`/`UPDATE`.** У паттерна «проверить, потом записать» (`SELECT ... ; if not
+found: INSERT`) есть гонка: две параллельные доставки одного вебхука могут обе
+пройти `SELECT` до того, как любая из них закоммитит, и обе попытаются сделать
+`INSERT`. `ON CONFLICT` в Postgres переносит проверку уникальности в саму базу, так
+что вторая из двух параллельных вставок разрешается атомарно ограничением, а не
+логикой приложения, которая может попасть в гонку.
 
-**Why `UNIQUE(payment_id)`.** `payment_id` is the idempotency key the payment
-provider guarantees is stable across retries. The uniqueness lives in the database
-as a constraint, not as an application-level check, so it holds even under
-concurrent duplicate deliveries. `on_conflict_do_nothing(index_elements=["payment_id"])`
-turns a duplicate delivery into a no-op detected via `rowcount == 0`.
+**Почему `UNIQUE(payment_id)`.** `payment_id` - ключ идемпотентности, который
+платёжный провайдер гарантирует неизменным при повторных отправках. Уникальность
+хранится в базе как ограничение, а не как проверка на уровне приложения, поэтому
+она выполняется даже при параллельных дублирующихся доставках.
+`on_conflict_do_nothing(index_elements=["payment_id"])` превращает повторную доставку
+в пустую операцию, которую можно распознать по `rowcount == 0`.
 
-**Why `subscriptions` is updated inside the same transaction as the payment
-insert.** So the two facts ("this payment was received" and "this user's
-subscription is active until X") change together. If the subscription update
-happened in a separate transaction after the payment commit, a crash in between
-would leave a payment on record with no corresponding subscription — an
-inconsistent state that would require reconciliation logic to detect and fix.
-Doing both in one transaction removes the need for that logic entirely.
+**Почему `subscriptions` обновляется в той же транзакции, что и вставка платежа.**
+Чтобы два факта («этот платёж получен» и «подписка пользователя активна до X»)
+менялись вместе. Если бы обновление подписки шло в отдельной транзакции после коммита
+платежа, сбой между ними оставил бы в базе платёж без соответствующей подписки. Это
+неконсистентное состояние, для обнаружения и исправления которого нужна была бы
+логика сверки. Выполнение обеих операций в одной транзакции полностью снимает
+необходимость в такой логике.
 
-**Why the webhook is idempotent, and why that matters.** Payment providers deliver
-webhooks at-least-once — they retry on timeout, on non-2xx responses, on no
-response at all. The handler treats `payment_id` as the identity of the event: the
-first delivery inserts the payment and activates the subscription; every
-subsequent delivery of the same event hits `ON CONFLICT DO NOTHING`, returns
-`"already_processed"`, and does **not** re-run the subscription upsert. Duplicate
-deliveries are safe by construction — the response differs (`processed` vs.
-`already_processed`) but the database state after N deliveries of the same event
-is identical to after 1.
+**Почему вебхук идемпотентен и почему это важно.** Платёжные провайдеры доставляют
+вебхуки как минимум один раз: они повторяют отправку при таймауте, при ответах не
+из семейства 2xx и при полном отсутствии ответа. Обработчик считает `payment_id`
+идентичностью события: первая доставка вставляет платёж и активирует подписку;
+каждая последующая доставка того же события упирается в `ON CONFLICT DO NOTHING`,
+возвращает `"already_processed"` и **не** запускает upsert подписки заново.
+Дублирующиеся доставки безопасны по построению. Ответ отличается (`processed` и
+`already_processed`), но состояние базы после N доставок одного события такое же,
+как после одной.
 
-**Why it's not possible to end up with "payment exists, subscription doesn't".**
-That state would require the payment insert to commit while the subscription
-upsert is skipped or fails silently. Because both statements run inside one
-`session.begin()` block, any failure after the payment insert rolls the payment
-insert back too — there is no code path that persists one without the other.
+**Почему нельзя получить состояние «платёж есть, подписки нет».** Для этого вставка
+платежа должна закоммититься, а upsert подписки при этом быть пропущен или упасть
+молча. Поскольку оба оператора выполняются внутри одного блока `session.begin()`,
+любой сбой после вставки платежа откатывает и саму вставку платежа, так что нет
+пути в коде, который сохранил бы одно без другого.
 
 ---
 
-# Running
+# Запуск
 
 ```bash
 docker compose up
 ```
 
-Apply migrations (in a second terminal, once the `db` service is healthy):
+Применить миграции (во втором терминале, когда сервис `db` станет healthy):
 
 ```bash
 docker compose exec backend alembic upgrade head
 ```
 
-The API is then available at `http://localhost:8000` (`uvicorn`, started by the
-`backend` container).
+После этого API доступен по адресу `http://localhost:8000` (`uvicorn`, запускается
+контейнером `backend`).
 
-For local (non-Docker) development:
+Для локальной разработки без Docker:
 
 ```bash
 pip install -r requirements.txt
@@ -113,7 +118,7 @@ uvicorn app.main:app --reload
 
 ## `POST /webhook/payment`
 
-Request:
+Запрос:
 
 ```json
 {
@@ -124,19 +129,19 @@ Request:
 }
 ```
 
-Response (first delivery):
+Ответ (первая доставка):
 
 ```json
 { "payment_id": "pay_demo_001", "result": "processed" }
 ```
 
-Response (duplicate delivery of the same `payment_id`):
+Ответ (повторная доставка с тем же `payment_id`):
 
 ```json
 { "payment_id": "pay_demo_001", "result": "already_processed" }
 ```
 
-Response (`status` other than `CONFIRMED`, e.g. `PENDING`):
+Ответ (`status` отличается от `CONFIRMED`, например `PENDING`):
 
 ```json
 { "payment_id": "pay_demo_002", "result": "ignored" }
@@ -148,52 +153,53 @@ Response (`status` other than `CONFIRMED`, e.g. `PENDING`):
 { "status": "ok" }
 ```
 
-Interactive docs (Swagger UI) at `GET /docs`.
+Интерактивная документация (Swagger UI) доступна по `GET /docs`.
 
 ---
 
-# SQL task
+# SQL-задача
 
-[`query.sql`](query.sql) — users with an active subscription who have no
-`meetings_attendance` record in the last 30 days.
-
----
-
-# Design decisions
-
-**Why these models.** `users`, `payments`, `subscriptions` map 1:1 onto the
-domain facts the webhook needs: who paid, what was paid, and what access that
-payment grants. `payments` is an append-only ledger of provider events;
-`subscriptions` is current-state derived from that ledger (one row per user,
-overwritten on renewal) — modeling them as two tables keeps "what happened" and
-"what's true right now" separate instead of inferring current access by
-scanning the payment history on every request.
-
-**Why this transaction boundary.** The boundary is exactly the set of writes that
-must be all-or-nothing from the caller's point of view: one payment event in,
-one subscription state out. Nothing outside that (e.g. the HTTP response
-serialization) needs to be inside the transaction, and nothing inside it could be
-safely split into two transactions without reintroducing the inconsistent-state
-problem described above.
-
-**Why these constraints.** `UNIQUE(payment_id)` on `payments` is the idempotency
-guarantee. `UNIQUE(user_id)` on `subscriptions` encodes the business rule "a user
-has at most one subscription" directly in the schema, which is what makes
-`ON CONFLICT (user_id) DO UPDATE` a correct upsert instead of an approximation of
-one. `CHECK (amount > 0)` and the `gt=0`/`min_length=1` Pydantic validators reject
-malformed provider payloads before they reach the database.
+[`query.sql`](query.sql): пользователи с активной подпиской, у которых нет записи в
+`meetings_attendance` за последние 30 дней.
 
 ---
 
-# Known limitations
+# Проектные решения
 
-- No webhook signature verification — the endpoint trusts any caller that can
-  reach it. A production version would verify a provider-supplied signature
-  header before processing the payload.
-- No authentication/authorization on any endpoint.
-- No automated test suite.
-- `subscriptions.expires_at` is always reset to "now + 30 days" on a confirmed
-  payment; there's no proration or stacking logic for renewals made before the
-  current period ends.
-- `app/api/v1/` is mounted with no endpoints under it — reserved for future
-  versioned routes, currently dead weight.
+**Почему именно эти модели.** `users`, `payments`, `subscriptions` один в один
+соответствуют фактам предметной области, которые нужны вебхуку: кто заплатил, что
+было оплачено и какой доступ даёт этот платёж. `payments` - журнал событий
+провайдера, в который только добавляются записи; `subscriptions` - текущее
+состояние, выведенное из этого журнала (одна строка на пользователя,
+перезаписывается при продлении). Две таблицы разделяют «что произошло» и «что
+верно прямо сейчас», и текущий доступ не приходится выводить сканированием истории
+платежей при каждом запросе.
+
+**Почему такая граница транзакции.** Граница охватывает ровно тот набор записей,
+которые с точки зрения вызывающей стороны должны выполняться по принципу
+«всё или ничего»: на входе одно событие платежа, на выходе одно состояние
+подписки. Ничто снаружи (например, сериализация HTTP-ответа) не обязано быть внутри
+транзакции, а ничто внутри нельзя безопасно разделить на две транзакции без
+возврата к описанной выше проблеме неконсистентного состояния.
+
+**Почему именно эти ограничения.** `UNIQUE(payment_id)` в `payments` обеспечивает
+идемпотентность. `UNIQUE(user_id)` в `subscriptions` кодирует бизнес-правило «у
+пользователя не больше одной подписки» прямо в схеме, и именно поэтому
+`ON CONFLICT (user_id) DO UPDATE` является корректным upsert, а не его
+приближением. `CHECK (amount > 0)` и валидаторы Pydantic `gt=0`/`min_length=1`
+отклоняют некорректные данные от провайдера до того, как они попадут в базу.
+
+---
+
+# Известные ограничения
+
+- Нет проверки подписи вебхука: эндпоинт доверяет любому, кто до него достучится.
+  В production-версии перед обработкой payload нужно проверять подпись из
+  заголовка, который присылает провайдер.
+- Нет аутентификации и авторизации ни на одном эндпоинте.
+- Нет автоматических тестов.
+- `subscriptions.expires_at` при подтверждённом платеже всегда сбрасывается на
+  «сейчас + 30 дней»; логики пропорционального пересчёта или наложения периодов для
+  продлений до окончания текущего периода нет.
+- `app/api/v1/` подключён, но под ним нет ни одного эндпоинта. Он зарезервирован
+  под будущие версионированные маршруты и пока является мёртвым грузом.
