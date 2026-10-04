@@ -1,4 +1,4 @@
-# Project
+# Foundation: payment webhooks → subscriptions
 
 A minimal backend service that accepts payment provider webhooks and turns confirmed
 payments into active user subscriptions. A single `POST /webhook/payment` endpoint
