@@ -1,16 +1,18 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
+if TYPE_CHECKING:
+    from app.models.user import User
+
 
 class Payment(Base):
     __tablename__ = "payments"
-    __table_args__ = (
-        CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
-    )
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_payments_amount_positive"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     payment_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)

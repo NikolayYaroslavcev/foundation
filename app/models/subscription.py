@@ -1,16 +1,18 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
+if TYPE_CHECKING:
+    from app.models.user import User
+
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
-    __table_args__ = (
-        UniqueConstraint("user_id", name="uq_subscriptions_user_id"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", name="uq_subscriptions_user_id"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(

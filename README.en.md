@@ -109,6 +109,20 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
+## Tests
+
+Integration tests run against a real Postgres: a repeated delivery, ten concurrent duplicates of
+one payment, a subscription renewal, ignored unconfirmed statuses and validation.
+Every table is truncated before each test, so point `DATABASE_URL` at a separate database.
+
+```bash
+pip install -r requirements-dev.txt
+alembic upgrade head
+ruff check . && pytest
+```
+
+CI runs the same steps on every push.
+
 ---
 
 # API
